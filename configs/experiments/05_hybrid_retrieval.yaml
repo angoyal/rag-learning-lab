@@ -1,0 +1,21 @@
+# Experiment 05: Hybrid retrieval (BM25 + dense)
+# Combines sparse keyword matching with dense semantic search.
+
+experiment_name: hybrid_retrieval
+
+ingestion:
+  chunker: recursive
+  chunk_size: 512
+  chunk_overlap: 50
+  embedding_model: all-MiniLM-L6-v2
+
+retrieval:
+  top_k: 5
+  retriever: hybrid
+  fusion: rrf
+  reranker: null
+
+generation:
+  llm: ollama/llama3.2
+  temperature: 0.1
+  prompt_template: default_qa

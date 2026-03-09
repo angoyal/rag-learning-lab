@@ -1,0 +1,19 @@
+# Experiment 03: BGE embeddings
+# Swaps in BGE-small for embedding comparison against MiniLM baseline.
+
+experiment_name: bge_embeddings
+
+ingestion:
+  chunker: fixed
+  chunk_size: 512
+  chunk_overlap: 50
+  embedding_model: BAAI/bge-small-en-v1.5
+
+retrieval:
+  top_k: 5
+  reranker: null
+
+generation:
+  llm: ollama/llama3.2
+  temperature: 0.1
+  prompt_template: default_qa

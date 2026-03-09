@@ -1,0 +1,19 @@
+# Experiment 01: Baseline RAG configuration
+# Fixed chunking, MiniLM embeddings, dense retrieval, no reranker.
+
+experiment_name: baseline_fixed_512
+
+ingestion:
+  chunker: fixed
+  chunk_size: 512
+  chunk_overlap: 50
+  embedding_model: all-MiniLM-L6-v2
+
+retrieval:
+  top_k: 5
+  reranker: null
+
+generation:
+  llm: ollama/llama3.2
+  temperature: 0.1
+  prompt_template: default_qa

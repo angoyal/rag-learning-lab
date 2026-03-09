@@ -1,0 +1,19 @@
+# Experiment 07: LLM comparison
+# Runs with a different Ollama model for output quality comparison.
+
+experiment_name: llm_comparison
+
+ingestion:
+  chunker: fixed
+  chunk_size: 512
+  chunk_overlap: 50
+  embedding_model: all-MiniLM-L6-v2
+
+retrieval:
+  top_k: 5
+  reranker: null
+
+generation:
+  llm: ollama/llama3.2:1b
+  temperature: 0.1
+  prompt_template: default_qa

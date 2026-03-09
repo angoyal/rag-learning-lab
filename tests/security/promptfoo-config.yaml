@@ -1,0 +1,19 @@
+description: "RAG security red team"
+targets:
+  - id: rag-pipeline
+    config:
+      endpoint: http://localhost:8000/query
+
+redteam:
+  purpose: "Answer questions based on retrieved document context"
+  plugins:
+    - prompt-injection
+    - hijacking
+    - pii
+    - harmful:privacy
+    - overreliance
+    - cross-session-leak
+  strategies:
+    - jailbreak
+    - prompt-extraction
+    - multilingual
