@@ -19,6 +19,7 @@ import yaml
 from src.pipeline import RAGPipeline, load_config
 
 DEFAULT_CONVERSATIONS_DIR = "data/conversations"
+METADATA_FILENAME = "arxiv_metadata.yaml"
 
 
 def conversation_id() -> str:
@@ -119,16 +120,100 @@ def delete_all_conversations(conv_dir: Path) -> int:
     return count
 
 
+def load_arxiv_metadata(source_paths: list[str]) -> dict[str, dict]:
+    """Load arXiv metadata from YAML sidecars found alongside source files.
+
+    Searches for arxiv_metadata.yaml in the directories containing the source
+    files. Returns a dict mapping pdf_file name to paper metadata.
+
+    Args:
+        source_paths: List of source file paths from retrieval results.
+
+    Returns:
+        Dict mapping filename to paper metadata dict.
+    """
+    metadata = {}
+    searched_dirs: set[str] = set()
+    for source in source_paths:
+        parent = str(Path(source).parent)
+        if parent in searched_dirs:
+            continue
+        searched_dirs.add(parent)
+        meta_path = Path(parent) / METADATA_FILENAME
+        if meta_path.exists():
+            with open(meta_path) as f:
+                data = yaml.safe_load(f)
+            for paper in data.get("papers", []):
+                pdf_file = paper.get("pdf_file", "")
+                if pdf_file:
+                    metadata[pdf_file] = paper
+    return metadata
+
+
+def print_papers(last_results: list[dict]) -> None:
+    """Print title and abstract for papers cited in the last answer.
+
+    Args:
+        last_results: Retrieval results from the most recent query.
+    """
+    if not last_results:
+        print("  No results yet — ask a question first.\n")
+        return
+
+    sources = []
+    seen: set[str] = set()
+    for r in last_results:
+        source = r.get("metadata", {}).get("source", "")
+        if source and source not in seen:
+            seen.add(source)
+            sources.append(source)
+
+    metadata = load_arxiv_metadata(sources)
+    if not metadata:
+        print("  No arxiv_metadata.yaml found alongside source files.\n")
+        return
+
+    printed = 0
+    for source in sources:
+        filename = Path(source).name
+        paper = metadata.get(filename)
+        if not paper:
+            continue
+        printed += 1
+        title = paper.get("title", "Unknown")
+        abstract = paper.get("abstract", "No abstract available.")
+        authors = ", ".join(paper.get("authors", []))
+        arxiv_id = paper.get("arxiv_id", "")
+        print(f"  [{printed}] {title}")
+        if authors:
+            print(f"      Authors: {authors}")
+        if arxiv_id:
+            print(f"      https://arxiv.org/abs/{arxiv_id}")
+        print(f"      Abstract: {abstract[:300]}{'...' if len(abstract) > 300 else ''}")
+        print()
+
+    if printed == 0:
+        print("  No metadata found for the cited sources.\n")
+
+
 def print_sources(results: list[dict]) -> None:
-    """Print unique source filenames from retrieval results."""
+    """Print unique sources as clickable file:// URLs.
+
+    Args:
+        results: Retrieval results with metadata containing source paths.
+    """
+    seen = set()
     sources = []
     for r in results:
         source = r.get("metadata", {}).get("source", "")
-        if source:
-            sources.append(Path(source).name)
-    unique_sources = list(dict.fromkeys(sources))
-    if unique_sources:
-        print(f"\nSources: {', '.join(unique_sources)}")
+        if source and source not in seen:
+            seen.add(source)
+            sources.append(source)
+    if sources:
+        print("\nSources:")
+        for source in sources:
+            abs_path = Path(source).resolve()
+            print(f"  • {abs_path.name}  file://{abs_path}")
 
 
 def print_chunks(results: list[dict], chunks: list[str]) -> None:
@@ -146,7 +231,7 @@ def print_chunks(results: list[dict], chunks: list[str]) -> None:
 
 def handle_slash_command(
     command: str, conv_dir: Path, conv_id: str, title: str, turns: list[dict],
-    show_chunks: bool, show_prompt: bool,
+    show_chunks: bool, show_prompt: bool, last_results: list[dict] | None = None,
 ) -> tuple[str, str, list[dict], bool, bool, bool]:
     """Handle a slash command and return updated state.
 
@@ -158,6 +243,7 @@ def handle_slash_command(
         turns: Current conversation turns.
         show_chunks: Current show-chunks toggle state.
         show_prompt: Current show-prompt toggle state.
+        last_results: Retrieval results from the most recent query.
 
     Returns:
         Tuple of (conv_id, title, turns, show_chunks, show_prompt, handled).
@@ -266,10 +352,15 @@ def handle_slash_command(
             print("  Cancelled\n")
         return conv_id, title, turns, show_chunks, show_prompt, True
 
+    if cmd == "/papers":
+        print_papers(last_results or [])
+        return conv_id, title, turns, show_chunks, show_prompt, True
+
     if cmd == "/help":
         print("  Commands:")
         print("    /chunks         Toggle chunk display")
         print("    /prompt         Toggle prompt display")
+        print("    /papers         Show title & abstract of cited papers")
         print("    /new            Start a new conversation")
         print("    /conversations  List saved conversations")
         print("    /resume [id]    Resume a previous conversation")
@@ -320,6 +411,7 @@ def main() -> None:
     conv_id = conversation_id()
     title = ""
     turns: list[dict] = []
+    last_results: list[dict] = []
     show_chunks = args.show_chunks
     show_prompt = args.show_prompt
 
@@ -344,7 +436,7 @@ def main() -> None:
             conv_id, title, turns, show_chunks, show_prompt, _ = (
                 handle_slash_command(
                     question, conv_dir, conv_id, title, turns,
-                    show_chunks, show_prompt,
+                    show_chunks, show_prompt, last_results,
                 )
             )
             continue
@@ -356,9 +448,12 @@ def main() -> None:
         if result.get("rewritten_query"):
             print(f"  (rewritten: {result['rewritten_query']})")
 
-        print(f"\nAnswer: {result['answer']}")
-        print_sources(result["results"])
-        print(f"({len(result['chunks'])} chunks, {elapsed:.2f}s)\n")
+        last_results = result["results"]
+
+        print()
+        print(result["answer"])
+        print_sources(last_results)
+        print(f"\n({len(result['chunks'])} chunks, {elapsed:.2f}s)\n")
 
         if show_chunks:
             print_chunks(result["results"], result["chunks"])

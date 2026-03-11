@@ -443,8 +443,9 @@ class TestPrintSources:
         output = capsys.readouterr().out
         assert "paper_a.pdf" in output
         assert "paper_b.pdf" in output
-        # Should appear only once
-        assert output.count("paper_a.pdf") == 1
+        # Should appear on only one line (deduplicated)
+        lines_with_a = [l for l in output.splitlines() if "paper_a.pdf" in l]
+        assert len(lines_with_a) == 1
 
     def test_no_sources(self, capsys) -> None:
         print_sources([{"metadata": {}}])
