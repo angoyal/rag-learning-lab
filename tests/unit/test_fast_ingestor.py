@@ -195,9 +195,13 @@ class TestChunkEmbedStore:
             store=store, embedder=embedder,
             chunker_strategy="fixed", chunk_size=200, chunk_overlap=20,
         )
-        count = ingestor._chunk_embed_store(SAMPLE_TEXT, "test.txt")
-        assert count >= 2
-        assert store.count() == count
+        result = ingestor._chunk_embed_store(SAMPLE_TEXT, "test.txt")
+        assert result["num_chunks"] >= 2
+        assert store.count() == result["num_chunks"]
+        assert result["chunk_time_s"] >= 0
+        assert result["embed_time_s"] >= 0
+        assert result["store_time_s"] >= 0
+        assert result["num_sentences"] >= 1
 
     def test_semantic_strategy(self) -> None:
         store = ChromaStore(collection_name="test_ces_semantic")
@@ -206,9 +210,9 @@ class TestChunkEmbedStore:
             store=store, embedder=embedder,
             chunker_strategy="semantic",
         )
-        count = ingestor._chunk_embed_store(SAMPLE_TEXT, "test.txt")
-        assert count >= 1
-        assert store.count() == count
+        result = ingestor._chunk_embed_store(SAMPLE_TEXT, "test.txt")
+        assert result["num_chunks"] >= 1
+        assert store.count() == result["num_chunks"]
 
     def test_two_model_semantic(self) -> None:
         """Small model chunks, same model embeds (simulates two-model path)."""
@@ -220,10 +224,9 @@ class TestChunkEmbedStore:
             chunker_strategy="semantic",
             chunking_embedder=chunking_embedder,
         )
-        count = ingestor._chunk_embed_store(SAMPLE_TEXT, "test.txt")
-        assert count >= 1
-        assert store.count() == count
-        # Embeddings should be from the main embedder's dimension
+        result = ingestor._chunk_embed_store(SAMPLE_TEXT, "test.txt")
+        assert result["num_chunks"] >= 1
+        assert store.count() == result["num_chunks"]
         query_emb = embedder.embed(["What is deep learning?"])[0]
         results = store.query(query_emb, top_k=3)
         assert len(results) >= 1
@@ -235,8 +238,8 @@ class TestChunkEmbedStore:
             store=store, embedder=embedder,
             chunker_strategy="fixed", chunk_size=200, chunk_overlap=20,
         )
-        count = ingestor._chunk_embed_store("", "test.txt")
-        assert count == 0
+        result = ingestor._chunk_embed_store("", "test.txt")
+        assert result["num_chunks"] == 0
 
 
 # ---------------------------------------------------------------------------

@@ -33,6 +33,7 @@ data/chroma.*/
 *.lance/
 mlruns/
 mlflow.db
+debug/
 
 # Notebooks
 .ipynb_checkpoints/
