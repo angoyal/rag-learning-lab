@@ -55,6 +55,10 @@ class RAGPipeline:
 
         # Build components
         self.embedder = Embedder(ingestion.get("embedding_model", "all-MiniLM-L6-v2"))
+        chunking_model = ingestion.get("chunking_model")
+        self.chunking_embedder = (
+            Embedder(chunking_model) if chunking_model else None
+        )
         store_config = config.get("store", {})
         self.store = ChromaStore(
             collection_name=config.get("experiment_name", "default"),
@@ -109,6 +113,7 @@ class RAGPipeline:
             chunk_overlap=self.chunk_overlap,
             batch_size=self.batch_size,
             workers=self.workers,
+            chunking_embedder=self.chunking_embedder,
         )
         return ingestor.ingest(paths)
 

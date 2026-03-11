@@ -1,5 +1,7 @@
 # Experiment: arXiv auto-scaling papers (fast ingestor + pplx-embed)
-# Uses parallel PDF reading, batched embedding, and semantic embedding reuse.
+# Uses parallel PDF reading, two-model semantic chunking, and batched embedding.
+# chunking_model: small fast model for finding semantic split points
+# embedding_model: large high-quality model for storage/retrieval vectors
 
 experiment_name: arxiv_auto_scaling_fast
 
@@ -8,9 +10,10 @@ ingestion:
   chunker: semantic
   chunk_size: 512
   chunk_overlap: 50
+  chunking_model: all-MiniLM-L6-v2
   embedding_model: perplexity-ai/pplx-embed-v1-0.6B
-  batch_size: 32
-  workers: 8
+  batch_size: 128
+  workers: 12
 
 store:
   persist_directory: data/chroma

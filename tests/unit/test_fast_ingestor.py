@@ -210,6 +210,24 @@ class TestChunkEmbedStore:
         assert count >= 1
         assert store.count() == count
 
+    def test_two_model_semantic(self) -> None:
+        """Small model chunks, same model embeds (simulates two-model path)."""
+        store = ChromaStore(collection_name="test_ces_two_model")
+        embedder = Embedder("all-MiniLM-L6-v2")
+        chunking_embedder = Embedder("all-MiniLM-L6-v2")
+        ingestor = FastIngestor(
+            store=store, embedder=embedder,
+            chunker_strategy="semantic",
+            chunking_embedder=chunking_embedder,
+        )
+        count = ingestor._chunk_embed_store(SAMPLE_TEXT, "test.txt")
+        assert count >= 1
+        assert store.count() == count
+        # Embeddings should be from the main embedder's dimension
+        query_emb = embedder.embed(["What is deep learning?"])[0]
+        results = store.query(query_emb, top_k=3)
+        assert len(results) >= 1
+
     def test_empty_text_returns_zero(self) -> None:
         store = ChromaStore(collection_name="test_ces_empty")
         embedder = Embedder("all-MiniLM-L6-v2")
@@ -481,6 +499,31 @@ class TestPipelineIngestorRouting:
             },
         }
         p = RAGPipeline(config)
+        f = tmp_path / "test.txt"
+        f.write_text(SAMPLE_TEXT)
+        total = p.ingest([f])
+        assert total >= 1
+
+    def test_two_model_semantic_via_config(self, tmp_path: Path) -> None:
+        config = {
+            "experiment_name": "test_two_model_route",
+            "ingestion": {
+                "ingestor": "fast",
+                "chunker": "semantic",
+                "chunking_model": "all-MiniLM-L6-v2",
+                "embedding_model": "all-MiniLM-L6-v2",
+                "batch_size": 32,
+                "workers": 2,
+            },
+            "retrieval": {"top_k": 3, "reranker": None},
+            "generation": {
+                "llm": "ollama/llama3.2",
+                "temperature": 0.0,
+                "prompt_template": "default_qa",
+            },
+        }
+        p = RAGPipeline(config)
+        assert p.chunking_embedder is not None
         f = tmp_path / "test.txt"
         f.write_text(SAMPLE_TEXT)
         total = p.ingest([f])

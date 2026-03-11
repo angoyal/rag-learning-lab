@@ -80,14 +80,21 @@ class FastIngestor:
     The main thread consumes extracted text: chunks, embeds on GPU,
     and stores to ChromaDB (all single-threaded resources).
 
+    For semantic chunking with a large embedding model, a separate
+    lightweight ``chunking_embedder`` can detect sentence boundaries
+    quickly while the main ``embedder`` produces high-quality vectors
+    for storage and retrieval.
+
     Args:
         store: ChromaDB vector store to write to.
-        embedder: Embedder for computing text embeddings.
+        embedder: Embedder for computing storage/retrieval embeddings.
         chunker_strategy: Chunking strategy name.
         chunk_size: Maximum chunk size in characters.
         chunk_overlap: Overlap between consecutive chunks.
         batch_size: Number of texts per embedding batch.
         workers: Number of parallel reader threads.
+        chunking_embedder: Optional lightweight embedder for semantic
+            split-point detection. Falls back to ``embedder`` if not set.
     """
 
     def __init__(
@@ -99,9 +106,11 @@ class FastIngestor:
         chunk_overlap: int = 50,
         batch_size: int = 256,
         workers: int = 4,
+        chunking_embedder: Embedder | None = None,
     ):
         self.store = store
         self.embedder = embedder
+        self.chunking_embedder = chunking_embedder
         self.chunker_strategy = chunker_strategy
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
@@ -139,6 +148,10 @@ class FastIngestor:
     def _chunk_embed_store(self, text: str, source: str) -> int:
         """Chunk text, embed, and store to ChromaDB. Runs on main thread.
 
+        For semantic chunking with a separate chunking_embedder:
+        1. Use the small chunking_embedder to find split points (fast)
+        2. Re-embed the final chunks with the main embedder (high quality)
+
         Args:
             text: Extracted document text.
             source: File path string for metadata.
@@ -147,22 +160,24 @@ class FastIngestor:
             Number of chunks stored.
         """
         if self.chunker_strategy == "semantic":
-            chunks, embeddings = semantic_chunker(
-                text, self.embedder, return_embeddings=True,
-                batch_size=self.batch_size,
-            )
+            chunker_emb = self.chunking_embedder or self.embedder
+            if self.chunking_embedder:
+                # Two-model path: small model chunks, large model embeds
+                chunks = semantic_chunker(
+                    text, chunker_emb, batch_size=self.batch_size,
+                )
+            else:
+                # Single-model path: reuse embeddings from chunking
+                chunks, embeddings = semantic_chunker(
+                    text, chunker_emb, return_embeddings=True,
+                    batch_size=self.batch_size,
+                )
         else:
             chunks = chunk_text(
                 text,
                 strategy=self.chunker_strategy,
                 chunk_size=self.chunk_size,
                 chunk_overlap=self.chunk_overlap,
-            )
-            if not chunks:
-                return 0
-            texts = [c.text for c in chunks]
-            embeddings = self.embedder.embed(
-                texts, batch_size=self.batch_size,
             )
 
         if not chunks:
@@ -173,12 +188,15 @@ class FastIngestor:
             {"source": source, "chunk_index": c.index}
             for c in chunks
         ]
-        self.store.add(
-            texts,
-            embeddings if isinstance(embeddings, np.ndarray)
-            else np.array(embeddings),
-            metadatas,
-        )
+
+        # Embed with the main embedder (skipped only when single-model
+        # semantic chunking already produced embeddings above)
+        if self.chunker_strategy != "semantic" or self.chunking_embedder:
+            embeddings = self.embedder.embed(
+                texts, batch_size=self.batch_size,
+            )
+
+        self.store.add(texts, np.array(embeddings), metadatas)
         return len(chunks)
 
     def _ingest_producer_consumer(self, paths: list[Path]) -> int:
