@@ -502,6 +502,13 @@ rag-learning-lab/
 │   │   ├── deepeval_eval.py         # DeepEval metrics wrapper
 │   │   └── custom_metrics.py        # latency, token count, cost
 │   │
+│   ├── telemetry/
+│   │   ├── __init__.py              # init tracer + meter providers
+│   │   ├── tracing.py              # span decorators for pipeline components
+│   │   ├── metrics.py              # Prometheus metric definitions + helpers
+│   │   ├── logging.py              # structured JSON logger with trace-ID injection
+│   │   └── health.py              # component health probes for /healthz
+│   │
 │   ├── pipeline.py                  # wires components together from config
 │   └── experiment_runner.py         # loads config, runs pipeline, logs to MLflow
 │
@@ -1403,6 +1410,151 @@ Build a minimal pipeline using only: `sentence-transformers`, `numpy` (cosine si
 
 ---
 
+## 8. Pipeline Telemetry Contract
+
+> This section defines the **instrumentation** that the RAG pipeline emits.
+> It does NOT cover the monitoring dashboard, alert rules, or auto-remediation — those belong in a separate AIOps project that consumes this telemetry.
+> Think of this as the "sensors on the train"; the control room is a separate system.
+
+### 8.1 Design Principle: Emit, Don't Consume
+
+The RAG pipeline is responsible **only** for emitting structured telemetry. It has no opinion on how that telemetry is stored, visualized, or alerted on. This keeps the pipeline lean and lets you swap monitoring backends without touching pipeline code.
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                        RAG Pipeline (this project)                  │
+│                                                                     │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐           │
+│  │ Ingest   │→ │ Retrieve │→ │ Rerank   │→ │ Generate │           │
+│  └────┬─────┘  └────┬─────┘  └────┬─────┘  └────┬─────┘           │
+│       │              │              │              │                 │
+│       ▼              ▼              ▼              ▼                 │
+│  ┌─────────────────────────────────────────────────────────┐        │
+│  │              src/telemetry/ (this section)               │        │
+│  │  • OpenTelemetry spans per component                    │        │
+│  │  • Prometheus metrics (counters, histograms, gauges)    │        │
+│  │  • Structured JSON logs with correlation IDs            │        │
+│  │  • /healthz endpoint                                    │        │
+│  └────────────────────────┬────────────────────────────────┘        │
+│                           │ OTLP export                             │
+└───────────────────────────┼─────────────────────────────────────────┘
+                            │
+                            ▼
+              ┌──────────────────────────┐
+              │   AIOps project          │
+              │   (separate repo)        │
+              │                          │
+              │  • Collector (OTel)      │
+              │  • Prometheus / Tempo    │
+              │  • Grafana dashboards    │
+              │  • Alertmanager rules    │
+              │  • Auto-remediation      │
+              └──────────────────────────┘
+```
+
+### 8.2 Three Signal Types
+
+| Signal | What it captures | Format | Export |
+|---|---|---|---|
+| **Traces** | A single query's journey through every pipeline stage with timing | OpenTelemetry spans | OTLP (gRPC or HTTP) |
+| **Metrics** | Aggregated counters, histograms, gauges per component | Prometheus exposition format | `/metrics` endpoint or OTLP |
+| **Logs** | Discrete events — errors, config changes, index rebuilds | Structured JSON (correlation ID = trace ID) | stdout → collector |
+
+### 8.3 Trace Spans per Component
+
+Every query produces a single trace. Each pipeline stage creates a child span with standard attributes.
+
+| Span name | Attributes | Example values |
+|---|---|---|
+| `rag.query` | `query.text`, `query.id`, `config.name` | `"What is RAG?"`, `q-abc123`, `baseline_v1` |
+| `rag.retrieve` | `retriever.type`, `top_k`, `results.count`, `results.scores` | `hybrid`, `10`, `10`, `[0.92, 0.87, ...]` |
+| `rag.rerank` | `reranker.model`, `input.count`, `output.count`, `top_score` | `bge-reranker-v2-m3`, `10`, `5`, `0.95` |
+| `rag.generate` | `llm.model`, `llm.provider`, `prompt.tokens`, `completion.tokens`, `temperature` | `llama3.2:3b`, `ollama`, `512`, `128`, `0.1` |
+| `rag.ingest` | `source.type`, `source.path`, `chunks.count`, `chunks.avg_tokens` | `pdf`, `report.pdf`, `42`, `256` |
+| `rag.embed` | `model.name`, `batch.size`, `dimensions` | `all-MiniLM-L6-v2`, `32`, `384` |
+
+### 8.4 Metrics Catalog
+
+Exposed via a `/metrics` endpoint (Prometheus format) or pushed via OTLP.
+
+| Metric name | Type | Labels | Description |
+|---|---|---|---|
+| `rag_query_duration_seconds` | histogram | `stage` (`retrieve`, `rerank`, `generate`) | Latency per pipeline stage |
+| `rag_query_total` | counter | `status` (`success`, `error`) | Total queries processed |
+| `rag_retrieval_results` | histogram | `retriever_type` | Number of chunks returned per query |
+| `rag_retrieval_top_score` | histogram | `retriever_type` | Similarity score of best result |
+| `rag_llm_tokens_total` | counter | `direction` (`prompt`, `completion`), `model` | Token usage |
+| `rag_llm_cost_dollars` | counter | `model`, `provider` | Estimated cost (cloud LLMs only) |
+| `rag_ingest_documents_total` | counter | `source_type`, `status` | Documents ingested |
+| `rag_ingest_chunks_total` | counter | `chunker_type` | Chunks produced |
+| `rag_vectorstore_size` | gauge | `store_type` | Number of vectors in the store |
+| `rag_vectorstore_index_duration_seconds` | histogram | `store_type` | Time to index a batch |
+| `rag_eval_score` | gauge | `metric` (`faithfulness`, `relevancy`, `precision`, `recall`) | Latest evaluation scores |
+| `rag_health_status` | gauge | `component` | 1 = healthy, 0 = degraded |
+
+### 8.5 Health Check Endpoint
+
+The FastAPI serving layer exposes `GET /healthz` that checks every component:
+
+```json
+{
+  "status": "healthy",
+  "version": "2026.03.09-143022",
+  "components": {
+    "ollama":       { "status": "healthy", "latency_ms": 12 },
+    "chromadb":     { "status": "healthy", "vectors": 4832, "latency_ms": 3 },
+    "embedder":     { "status": "healthy", "model": "all-MiniLM-L6-v2", "latency_ms": 45 },
+    "reranker":     { "status": "healthy", "model": "bge-reranker-v2-m3", "latency_ms": 8 }
+  },
+  "timestamp": "2026-03-09T14:30:22Z"
+}
+```
+
+Each component check is a lightweight probe (e.g., embed a single token, retrieve top-1 from a canary document, send a 1-token completion request). If any component is degraded, the top-level status flips to `"degraded"` — this is what the AIOps project polls or subscribes to.
+
+### 8.6 Implementation: `src/telemetry/` Module
+
+```
+src/telemetry/
+├── __init__.py           # init tracer + meter providers
+├── tracing.py            # span decorators for pipeline components
+├── metrics.py            # Prometheus metric definitions + helpers
+├── logging.py            # structured JSON logger with trace-ID injection
+└── health.py             # component health probes for /healthz
+```
+
+**Key design decisions:**
+
+- **Decorator-based instrumentation.** Each pipeline component gets a `@traced("rag.retrieve")` decorator that automatically creates a span, records latency, and sets standard attributes. No manual span management in business logic.
+- **LlamaIndex callback integration.** LlamaIndex's `CallbackManager` already fires events at each pipeline stage. The `tracing.py` module registers an OpenTelemetry callback handler that translates these events into spans — no monkeypatching needed.
+- **Graceful degradation.** If no OTLP collector is running, telemetry silently no-ops. The pipeline never fails because monitoring is down. Controlled by `OTEL_EXPORTER_OTLP_ENDPOINT` environment variable — if unset, export is disabled.
+- **Correlation.** Every log line includes the active trace ID, so logs and traces can be correlated in the AIOps project without extra plumbing.
+
+### 8.7 Dependencies
+
+Added to `pyproject.toml`:
+
+| Package | Purpose | License |
+|---|---|---|
+| `opentelemetry-api` | Tracing + metrics API | Apache-2.0 |
+| `opentelemetry-sdk` | Default tracer/meter implementations | Apache-2.0 |
+| `opentelemetry-exporter-otlp` | Export spans + metrics via OTLP | Apache-2.0 |
+| `opentelemetry-exporter-prometheus` | `/metrics` endpoint | Apache-2.0 |
+| `opentelemetry-instrumentation-fastapi` | Auto-instrument FastAPI routes | Apache-2.0 |
+
+### 8.8 What the AIOps Project Consumes (Out of Scope — Reference Only)
+
+This is a roadmap for the separate AIOps project. It is listed here so you know what the telemetry contract is designed to support.
+
+| AIOps phase | What it does | Consumes from this project |
+|---|---|---|
+| **Phase 1 — Observe** | Prometheus + Grafana + Tempo. Static dashboards showing pipeline topology, per-component latencies, throughput. | `/metrics` endpoint, OTLP traces, `/healthz` |
+| **Phase 2 — Alert** | Alertmanager rules. Topology nodes turn red/yellow/green. Notifications to Slack/email. | Metrics thresholds, health status gauge |
+| **Phase 3 — Diagnose** | Automated root cause analysis. Traces backward through pipeline to find the degraded component. | Full traces with span attributes, correlated logs |
+| **Phase 4 — Remediate** | Runbook automation. Restart Ollama, rebuild index, switch fallback model, scale cloud instances. | Health status, deployment version, rollback API |
+
+---
+
 ## Summary: Suggested Learning Order
 
 | Week | Focus | Key experiment |
@@ -1415,6 +1567,7 @@ Build a minimal pipeline using only: `sentence-transformers`, `numpy` (cosine si
 | 6 | Stress test with messy docs, scale up corpus | Exp 7 + 8 (robustness) |
 | 7 | Build from scratch, write up learnings | Exp 9 (understanding) |
 | 8 | Deploy to AWS and GCP, compare cost and latency | Deployment |
+| 9 | Add telemetry instrumentation, verify traces and metrics | Section 8 (telemetry) |
 
 ---
 
@@ -1433,6 +1586,8 @@ Build a minimal pipeline using only: `sentence-transformers`, `numpy` (cosine si
 - [all-MiniLM-L6-v2](https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2)
 - [RAGAS golden dataset](https://huggingface.co/datasets/dwb2023/ragas-golden-dataset)
 - [Open RAGBench](https://huggingface.co/datasets/vectara/open_ragbench)
+- [OpenTelemetry Python](https://github.com/open-telemetry/opentelemetry-python)
+- [OpenTelemetry Collector](https://github.com/open-telemetry/opentelemetry-collector)
 - [Chunking strategies research (arXiv 2504.19754)](https://arxiv.org/abs/2504.19754)
 - [AWS Bedrock pricing](https://aws.amazon.com/bedrock/pricing/)
 - [Vertex AI pricing](https://cloud.google.com/vertex-ai/generative-ai/pricing)
@@ -1529,7 +1684,31 @@ include all of the following sections:
    per query, error rate, vector store size), and instrumentation approach per
    platform.
 
-8. **Experiments to build intuition** — this is the heart of the plan. Define
+8. **Pipeline telemetry contract** — define the instrumentation layer that
+   the pipeline emits (but does NOT consume). This is the boundary between
+   the RAG project and a separate AIOps monitoring project. Include:
+   - Design principle: emit, don't consume. Pipeline owns sensors; the
+     control room is a separate system.
+   - Architecture diagram showing the telemetry boundary.
+   - Three signal types: traces (OpenTelemetry spans per component),
+     metrics (Prometheus counters, histograms, gauges), and structured
+     JSON logs with correlation IDs (trace ID).
+   - Trace spans table: one span per pipeline stage (`rag.query`,
+     `rag.retrieve`, `rag.rerank`, `rag.generate`, `rag.ingest`,
+     `rag.embed`) with standard attributes.
+   - Metrics catalog: latency histograms, query counters, token usage,
+     cost tracking, vector store size, eval scores, health status.
+   - Health check endpoint (`/healthz`) that probes every component and
+     reports per-component status + latency.
+   - Implementation as a `src/telemetry/` module using decorator-based
+     instrumentation, LlamaIndex callback integration, and graceful
+     degradation (no-op when no collector is running).
+   - OpenTelemetry dependencies (API, SDK, OTLP exporter, Prometheus
+     exporter, FastAPI instrumentation) — all Apache-2.0 licensed.
+   - Reference roadmap for the separate AIOps project phases: Observe →
+     Alert → Diagnose → Remediate (out of scope, listed for context).
+
+9. **Experiments to build intuition** — this is the heart of the plan. Define
    at least 9 experiments, each with a driving question, a table of runs with
    specific parameter variations, what to log, and a "what you'll learn"
    summary. The experiments should cover:
@@ -1544,7 +1723,7 @@ include all of the following sections:
    - "From scratch" baseline (build the core loop without any framework)
    Include a suggested week-by-week learning order.
 
-9. **References** — links to all GitHub repos, HuggingFace models/datasets,
+10. **References** — links to all GitHub repos, HuggingFace models/datasets,
    pricing pages, and research papers cited in the plan.
 
 Constraints:
