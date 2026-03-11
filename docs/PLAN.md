@@ -355,7 +355,7 @@ After adding a dependency on either machine, commit the updated `pyproject.toml`
 | Alt vector DB (local) | LanceDB | Apache-2.0 | [github.com/lancedb/lancedb](https://github.com/lancedb/lancedb) |
 | Embeddings (small) | all-MiniLM-L6-v2 | Apache-2.0 | [huggingface.co/sentence-transformers/all-MiniLM-L6-v2](https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2) |
 | Embeddings (mid) | BGE-M3 | MIT | [huggingface.co/BAAI/bge-m3](https://huggingface.co/BAAI/bge-m3) |
-| Embeddings (large) | Qwen3-Embedding-0.6B | Apache-2.0 | [huggingface.co/Qwen/Qwen3-Embedding-0.6B](https://huggingface.co/Qwen/Qwen3-Embedding-0.6B) |
+| Embeddings (large) | pplx-embed-v1-0.6B | Apache-2.0 | [huggingface.co/perplexity-ai/pplx-embed-v1-0.6B](https://huggingface.co/perplexity-ai/pplx-embed-v1-0.6B) |
 | Reranker | bge-reranker-v2-m3 | MIT | [huggingface.co/BAAI/bge-reranker-v2-m3](https://huggingface.co/BAAI/bge-reranker-v2-m3) |
 | LLM (local) | Llama 3.2 3B-Instruct (Q4_K_M) | Llama 3.2 Community | [huggingface.co/meta-llama/Llama-3.2-3B-Instruct](https://huggingface.co/meta-llama/Llama-3.2-3B-Instruct) |
 | Evaluation | RAGAS | Apache-2.0 | [github.com/explodinggradients/ragas](https://github.com/explodinggradients/ragas) |
@@ -410,8 +410,8 @@ After adding a dependency on either machine, commit the updated `pyproject.toml`
 
 ### 2.2 Key Design Decisions
 
-**Why LlamaIndex as the primary orchestrator?**
-It has the richest set of node parsers (chunkers), retrievers, and response synthesizers — perfect for experimenting. You'll also build a minimal "from-scratch" pipeline in plain Python so you understand what the framework hides from you.
+**Why build from scratch instead of using LlamaIndex/Haystack?**
+The pipeline is built in plain Python using `sentence-transformers`, `numpy`, ChromaDB, and raw `requests` to Ollama — no orchestration framework. This was originally planned as Experiment 9 ("from scratch baseline") but became the default approach. Building from scratch gives full control over every pipeline stage, makes debugging straightforward, and teaches you what frameworks abstract away. LlamaIndex or Haystack can be added later for comparison.
 
 **Why ChromaDB?**
 Zero-config, runs in-process, persists to disk. No server to manage. Swap to LanceDB or Qdrant later to see if it matters.
@@ -468,7 +468,12 @@ rag-learning-lab/
 │       ├── 02_semantic_chunking.yaml
 │       ├── 03_bge_embeddings.yaml
 │       ├── 04_with_reranker.yaml
-│       └── ...
+│       ├── 05_hybrid_retrieval.yaml
+│       ├── 06_prompt_variations.yaml
+│       ├── 07_llm_comparison.yaml
+│       ├── 08_scale_test.yaml
+│       ├── arxiv_auto_scaling.yaml       # arXiv corpus, default sequential ingestor
+│       └── arxiv_auto_scaling_fast.yaml  # arXiv corpus, fast parallel ingestor + two-model semantic chunking
 │
 ├── src/
 │   ├── __init__.py
@@ -477,13 +482,15 @@ rag-learning-lab/
 │   │   ├── __init__.py
 │   │   ├── readers.py               # PDF, DOCX, MD, HTML, TXT readers
 │   │   ├── chunkers.py              # fixed, recursive, semantic, sentence
-│   │   └── embedders.py             # wrapper around sentence-transformers
+│   │   ├── embedders.py             # wrapper around sentence-transformers
+│   │   ├── fast_ingestor.py         # producer-consumer parallel ingestor (see §3.1)
+│   │   └── metrics.py              # thread-safe per-document timing metrics with JSONL logging (see §3.2)
 │   │
 │   ├── store/
 │   │   ├── __init__.py
 │   │   ├── base.py                  # abstract VectorStore interface
 │   │   ├── chroma_store.py
-│   │   └── lance_store.py
+│   │   └── lance_store.py           # [STUB] planned alternative vector store
 │   │
 │   ├── retrieve/
 │   │   ├── __init__.py
@@ -500,9 +507,10 @@ rag-learning-lab/
 │   │   ├── __init__.py
 │   │   ├── ragas_eval.py            # RAGAS metrics wrapper
 │   │   ├── deepeval_eval.py         # DeepEval metrics wrapper
-│   │   └── custom_metrics.py        # latency, token count, cost
+│   │   ├── custom_metrics.py        # latency, token count, cost
+│   │   └── mlflow_logger.py        # [STUB] helper: log_experiment_run(), log_test_run()
 │   │
-│   ├── telemetry/
+│   ├── telemetry/                   # [PLANNED — not yet implemented]
 │   │   ├── __init__.py              # init tracer + meter providers
 │   │   ├── tracing.py              # span decorators for pipeline components
 │   │   ├── metrics.py              # Prometheus metric definitions + helpers
@@ -512,13 +520,20 @@ rag-learning-lab/
 │   ├── pipeline.py                  # wires components together from config
 │   └── experiment_runner.py         # loads config, runs pipeline, logs to MLflow
 │
+├── crawlers/
+│   └── arxiv_crawler.py             # arXiv paper downloader with metadata sidecar (see §3.5)
+│
 ├── scripts/
 │   ├── ingest_docs.py               # CLI: ingest a folder of docs
+│   ├── ask.py                       # interactive conversational RAG CLI (see §3.4)
 │   ├── run_experiment.py            # CLI: run one experiment config
-│   ├── run_sweep.py                 # CLI: run all experiments in a folder
-│   ├── compare_runs.py             # CLI: print comparison table from MLflow
+│   ├── run_sweep.py                 # [STUB] CLI: run all experiments in a folder
+│   ├── compare_runs.py             # [STUB] CLI: print comparison table from MLflow
 │   ├── deploy.py                    # CLI: deploy, rollback, and version management
-│   └── post_deploy_checks.py       # post-deployment approval workflow
+│   ├── post_deploy_checks.py       # post-deployment approval workflow
+│   ├── analyze_ingest.py           # metrics analysis: stats, charts, x-ray, MLflow export (see §3.2)
+│   ├── discover_topics.py          # KMeans topic clustering on document embeddings (see §3.6)
+│   └── discover_topics_hdbscan.py  # HDBSCAN alternative topic clustering (see §3.6)
 │
 ├── notebooks/
 │   ├── 01_understanding_chunking.ipynb
@@ -531,11 +546,20 @@ rag-learning-lab/
 │   ├── conftest.py                  # pytest-MLflow integration (auto-logs all test sessions)
 │   ├── unit/
 │   │   ├── test_chunkers.py
+│   │   ├── test_embedders.py
+│   │   ├── test_readers.py
 │   │   ├── test_retriever.py
-│   │   └── test_prompt_templates.py
+│   │   ├── test_prompt_templates.py
+│   │   ├── test_custom_metrics.py
+│   │   ├── test_fast_ingestor.py    # producer-consumer ingestor, two-model path, pipeline routing
+│   │   ├── test_ingest_metrics.py   # IngestMetrics collector including thread safety
+│   │   ├── test_ask.py             # interactive CLI command handling
+│   │   ├── test_eval_harness.py
+│   │   └── test_deploy.py          # deployment version/history tracking
 │   ├── integration/
 │   │   ├── test_ingest_pipeline.py
-│   │   └── test_query_pipeline.py
+│   │   ├── test_query_pipeline.py
+│   │   └── test_experiment_runner.py
 │   ├── eval/
 │   │   └── test_ragas_baseline.py   # assert metrics >= thresholds
 │   └── security/                    # ← all security tests isolated here
@@ -569,16 +593,136 @@ rag-learning-lab/
 ├── backups/                         # vector store snapshots, keyed by deploy version (gitignored)
 │
 ├── docs/
-│   ├── LEARNINGS.md                 # your public learning journal
-│   └── EXPERIMENT_LOG.md            # table of all experiments and takeaways
+│   ├── LEARNINGS.md                 # [PLANNED] your public learning journal
+│   └── EXPERIMENT_LOG.md            # [PLANNED] table of all experiments and takeaways
 │
-└── .github/
+└── .github/                         # [PLANNED — not yet implemented]
     └── workflows/
         ├── ci.yaml                  # lint + unit tests on every PR
         ├── eval.yaml                # run eval suite nightly or on demand
         ├── security.yaml            # security tests + dependency audit on every PR
         └── deploy.yaml              # deploy + approval workflow + auto-rollback
 ```
+
+### 3.1 Fast Parallel Ingestor
+
+The default sequential ingestor (`pipeline._ingest_default`) processes documents one at a time. For large corpora (thousands of PDFs), the **fast parallel ingestor** (`src/ingest/fast_ingestor.py`) uses a producer-consumer architecture:
+
+- **Producer threads** (configurable count, default 4): read PDFs from disk and extract text in parallel. This is the I/O bottleneck for large corpora.
+- **Main thread** (consumer): receives extracted text, chunks it, embeds on GPU, and stores to ChromaDB. GPU and ChromaDB are both single-threaded resources, so running them on the main thread avoids locking entirely.
+
+The speedup comes from overlapping: while the main thread embeds document N on the GPU, producer threads are already reading documents N+1 through N+8 from disk.
+
+Select the ingestor via config:
+
+```yaml
+ingestion:
+  ingestor: fast       # "default" for sequential, "fast" for parallel
+  workers: 12          # number of reader threads (fast ingestor only)
+```
+
+**Two-model semantic chunking.** When using semantic chunking with a large embedding model (e.g., 600M params), a separate lightweight `chunking_model` can detect sentence boundary split points quickly while the main `embedding_model` produces high-quality vectors for storage and retrieval:
+
+```yaml
+ingestion:
+  ingestor: fast
+  chunker: semantic
+  chunking_model: all-MiniLM-L6-v2              # 22M params — instant split-point detection
+  embedding_model: perplexity-ai/pplx-embed-v1-0.6B  # 600M params — high-quality 1024-dim vectors
+  batch_size: 128
+```
+
+Without `chunking_model`, the main `embedding_model` is used for both chunking and storage (slower but simpler).
+
+### 3.2 Ingestion Metrics and Analysis
+
+Both ingestors (default and fast) emit per-document timing metrics via the `IngestMetrics` collector (`src/ingest/metrics.py`). Metrics are buffered in a thread-safe `queue.Queue` and periodically flushed to a timestamped JSONL log file in `debug/logs/`.
+
+Each document record contains:
+
+| Field | Description |
+|---|---|
+| `source` | Filename |
+| `file_size_bytes` | File size on disk |
+| `read_time_s` | Time to read and extract text |
+| `num_sentences` | Sentence count |
+| `chunk_time_s` | Time to chunk text |
+| `num_chunks` | Number of chunks produced |
+| `embed_time_s` | Time to compute embeddings |
+| `store_time_s` | Time to write to ChromaDB |
+| `total_time_s` | Sum of all stages |
+| `error` | Error message (null on success) |
+
+**`scripts/analyze_ingest.py`** processes these logs after the fact:
+
+```bash
+# List available log files
+uv run python scripts/analyze_ingest.py --list
+
+# Summary: stats table (mean/median/p50/p95/stddev), top 10 slowest files, 4 matplotlib charts
+uv run python scripts/analyze_ingest.py debug/logs/ingest_20260310_143022.jsonl
+
+# X-ray: per-file stage breakdown, comparison to median, automated insight
+uv run python scripts/analyze_ingest.py debug/logs/ingest_20260310_143022.jsonl --file 2312.10997v1.pdf
+
+# Export to MLflow as a tracked run (params, summary metrics, per-doc step-indexed metrics, charts as artifacts)
+uv run python scripts/analyze_ingest.py debug/logs/ingest_20260310_143022.jsonl --export-mlflow
+```
+
+### 3.3 Conversational RAG
+
+The pipeline supports multi-turn conversations with context-aware query rewriting:
+
+- **Query rewriting:** When conversation history is provided, the LLM rewrites follow-up questions into self-contained queries (e.g., "What about the second one?" → "What is the architecture of the DPR dense passage retrieval model?"). This improves retrieval accuracy for follow-up questions.
+- **History-aware generation:** The `conversational_qa` prompt template includes prior conversation turns alongside retrieved context, enabling coherent multi-turn dialogue.
+- **Persistent conversation history:** Conversations are stored as YAML files in `data/conversations/`, enabling resume across sessions.
+
+### 3.4 Interactive RAG CLI (`scripts/ask.py`)
+
+A conversational Q&A interface for interacting with the RAG pipeline:
+
+```bash
+uv run python scripts/ask.py configs/experiments/04_with_reranker.yaml
+```
+
+Supports slash commands:
+
+| Command | Description |
+|---|---|
+| `/new` | Start a new conversation |
+| `/resume` | Resume a previous conversation |
+| `/conversations` | List saved conversations |
+| `/delete` | Delete a conversation |
+| `/chunks` | Toggle showing retrieved chunks |
+| `/prompt` | Toggle showing the full prompt sent to the LLM |
+| `/help` | Show available commands |
+
+### 3.5 arXiv Paper Crawler (`crawlers/arxiv_crawler.py`)
+
+Downloads research papers from arXiv into `data/raw/` for use as a real-world corpus:
+
+```bash
+# By search query
+uv run python crawlers/arxiv_crawler.py --query "retrieval augmented generation" --max-papers 10
+
+# Multiple topics
+uv run python crawlers/arxiv_crawler.py \
+    --query "retrieval augmented generation" \
+    --query "dense passage retrieval" \
+    --max-papers 5
+
+# Sort by date instead of relevance
+uv run python crawlers/arxiv_crawler.py --query "RAG" --max-papers 10 --sort-by date
+```
+
+Saves a `data/raw/arxiv_metadata.yaml` sidecar with paper title, authors, abstract, arXiv ID, published date, and categories. Skips already-downloaded PDFs on repeated runs.
+
+### 3.6 Topic Discovery
+
+Two scripts for exploring the semantic structure of an ingested corpus by clustering document embeddings:
+
+- **`scripts/discover_topics.py`** — KMeans clustering with configurable cluster count. Aggregates chunk-level embeddings to document-level, clusters, and displays representative papers per cluster.
+- **`scripts/discover_topics_hdbscan.py`** — HDBSCAN density-based clustering (no predefined cluster count). Better for corpora with uneven topic distribution.
 
 ---
 
@@ -1310,7 +1454,7 @@ This is the heart of the project. Run these experiments roughly in order — eac
 | 2a | all-MiniLM-L6-v2 | 384 | 80 MB |
 | 2b | all-mpnet-base-v2 | 768 | 420 MB |
 | 2c | BGE-M3 | 1024 | 2.2 GB |
-| 2d | Qwen3-Embedding-0.6B | 1024 | 2.4 GB |
+| 2d | pplx-embed-v1-0.6B | 1024 | 2.4 GB |
 
 **What to log:** RAGAS metrics + embedding latency + VRAM usage.
 **What you'll learn:** diminishing returns are real. MiniLM is surprisingly competitive for English-only use cases.

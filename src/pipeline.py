@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+import time
 from pathlib import Path
 
 import yaml
@@ -11,6 +13,7 @@ from src.generate.prompt_templates import render_prompt, render_rewrite
 from src.ingest.chunkers import chunk_text
 from src.ingest.embedders import Embedder
 from src.ingest.fast_ingestor import FastIngestor
+from src.ingest.metrics import IngestMetrics
 from src.ingest.readers import read_document
 from src.retrieve.reranker import Reranker
 from src.retrieve.retriever import Retriever
@@ -135,33 +138,98 @@ class RAGPipeline:
         skipped = 0
         n = len(paths)
 
-        for i, path in enumerate(paths, 1):
-            path = Path(path)
-            if str(path) in already_ingested:
-                skipped += 1
-                continue
-
-            try:
-                doc = read_document(path)
-                chunks = chunk_text(
-                    doc.text,
-                    strategy=self.chunker_strategy,
-                    chunk_size=self.chunk_size,
-                    chunk_overlap=self.chunk_overlap,
-                    embedder=self.embedder if self.chunker_strategy == "semantic" else None,
-                )
-                if not chunks:
-                    print(f"  [{i}/{n}] No text extracted: {path.name}")
+        with IngestMetrics() as metrics:
+            for i, path in enumerate(paths, 1):
+                path = Path(path)
+                if str(path) in already_ingested:
+                    skipped += 1
                     continue
-                texts = [c.text for c in chunks]
-                embeddings = self.embedder.embed(texts)
-                metadatas = [{"source": str(path), "chunk_index": c.index} for c in chunks]
-                self.store.add(texts, embeddings, metadatas)
-                total += len(chunks)
-                print(f"  [{i}/{n}] {path.name} -> {len(chunks)} chunks")
-            except Exception as e:
-                failed += 1
-                print(f"  [{i}/{n}] FAILED {path.name}: {e}")
+
+                file_size = path.stat().st_size if path.exists() else 0
+
+                try:
+                    # --- Read ---
+                    t0 = time.monotonic()
+                    doc = read_document(path)
+                    read_time = time.monotonic() - t0
+
+                    sentences = re.split(r"(?<=[.!?])\s+", doc.text)
+                    num_sentences = len([s for s in sentences if s.strip()])
+
+                    # --- Chunk ---
+                    t0 = time.monotonic()
+                    chunks = chunk_text(
+                        doc.text,
+                        strategy=self.chunker_strategy,
+                        chunk_size=self.chunk_size,
+                        chunk_overlap=self.chunk_overlap,
+                        embedder=self.embedder if self.chunker_strategy == "semantic" else None,
+                    )
+                    chunk_time = time.monotonic() - t0
+
+                    if not chunks:
+                        metrics.record({
+                            "source": path.name,
+                            "file_size_bytes": file_size,
+                            "read_time_s": read_time,
+                            "num_sentences": num_sentences,
+                            "chunk_time_s": chunk_time,
+                            "num_chunks": 0,
+                            "embed_time_s": 0.0,
+                            "store_time_s": 0.0,
+                            "total_time_s": read_time + chunk_time,
+                            "error": None,
+                        })
+                        print(f"  [{i}/{n}] No text extracted: {path.name}")
+                        continue
+
+                    texts = [c.text for c in chunks]
+                    metadatas = [{"source": str(path), "chunk_index": c.index} for c in chunks]
+
+                    # --- Embed ---
+                    t0 = time.monotonic()
+                    embeddings = self.embedder.embed(texts)
+                    embed_time = time.monotonic() - t0
+
+                    # --- Store ---
+                    t0 = time.monotonic()
+                    self.store.add(texts, embeddings, metadatas)
+                    store_time = time.monotonic() - t0
+
+                    total += len(chunks)
+                    total_time = read_time + chunk_time + embed_time + store_time
+
+                    metrics.record({
+                        "source": path.name,
+                        "file_size_bytes": file_size,
+                        "read_time_s": read_time,
+                        "num_sentences": num_sentences,
+                        "chunk_time_s": chunk_time,
+                        "num_chunks": len(chunks),
+                        "embed_time_s": embed_time,
+                        "store_time_s": store_time,
+                        "total_time_s": total_time,
+                        "error": None,
+                    })
+                    print(f"  [{i}/{n}] {path.name} -> {len(chunks)} chunks")
+                except Exception as e:
+                    failed += 1
+                    metrics.record({
+                        "source": path.name,
+                        "file_size_bytes": file_size,
+                        "read_time_s": 0.0,
+                        "num_sentences": 0,
+                        "chunk_time_s": 0.0,
+                        "num_chunks": 0,
+                        "embed_time_s": 0.0,
+                        "store_time_s": 0.0,
+                        "total_time_s": 0.0,
+                        "error": str(e),
+                    })
+                    print(f"  [{i}/{n}] FAILED {path.name}: {e}")
+
+                if i % 100 == 0:
+                    metrics.flush()
 
         if skipped:
             print(f"  Skipped {skipped} already-ingested document(s)")
