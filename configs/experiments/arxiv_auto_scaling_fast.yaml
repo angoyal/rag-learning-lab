@@ -1,0 +1,30 @@
+# Experiment: arXiv auto-scaling papers (fast ingestor + pplx-embed)
+# Uses parallel PDF reading, batched embedding, and semantic embedding reuse.
+
+experiment_name: arxiv_auto_scaling_fast
+
+ingestion:
+  ingestor: fast
+  chunker: semantic
+  chunk_size: 512
+  chunk_overlap: 50
+  embedding_model: perplexity-ai/pplx-embed-v1-0.6B
+  batch_size: 32
+  workers: 8
+
+store:
+  persist_directory: data/chroma
+
+retrieval:
+  top_k: 5
+  reranker: null
+
+generation:
+  llm: ollama/llama3.2
+  temperature: 0.0
+  prompt_template: default_qa
+
+data:
+  documents:
+    - data/arxivAutoScalingPapers
+  eval_set: data/eval_sets/sample_questions.yaml

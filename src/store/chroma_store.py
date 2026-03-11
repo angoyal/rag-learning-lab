@@ -25,8 +25,14 @@ class ChromaStore(BaseVectorStore):
         self,
         collection_name: str = "default",
         client: chromadb.ClientAPI | None = None,
+        persist_directory: str | None = None,
     ):
-        self._client = client or chromadb.Client()
+        if client:
+            self._client = client
+        elif persist_directory:
+            self._client = chromadb.PersistentClient(path=persist_directory)
+        else:
+            self._client = chromadb.Client()
         self._collection = self._client.get_or_create_collection(
             name=collection_name,
             metadata={"hnsw:space": "cosine"},
@@ -86,3 +92,10 @@ class ChromaStore(BaseVectorStore):
     def count(self) -> int:
         """Return the number of items in the collection."""
         return self._collection.count()
+
+    def ingested_sources(self) -> set[str]:
+        """Return the set of source filenames already stored in the collection."""
+        if self._collection.count() == 0:
+            return set()
+        all_meta = self._collection.get(include=["metadatas"])
+        return {m["source"] for m in all_meta["metadatas"] if "source" in m}

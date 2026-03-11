@@ -1,7 +1,7 @@
-# Experiment 02: Semantic chunking
-# Uses embedding-based semantic boundaries instead of fixed-size chunks.
+# Experiment: arXiv auto-scaling papers
+# Semantic chunking on auto-scaling research papers.
 
-experiment_name: semantic_chunking
+experiment_name: arxiv_auto_scaling
 
 ingestion:
   chunker: semantic
@@ -9,19 +9,19 @@ ingestion:
   chunk_overlap: 50
   embedding_model: all-MiniLM-L6-v2
 
+store:
+  persist_directory: data/chroma
+
 retrieval:
   top_k: 5
   reranker: null
 
-store:
-  persist_directory: data/chroma
-
 generation:
   llm: ollama/llama3.2
-  temperature: 0.1
+  temperature: 0.0
   prompt_template: default_qa
 
 data:
   documents:
-    - data/raw
+    - data/arxivAutoScalingPapers
   eval_set: data/eval_sets/sample_questions.yaml

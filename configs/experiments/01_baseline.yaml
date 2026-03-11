@@ -9,6 +9,9 @@ ingestion:
   chunk_overlap: 50
   embedding_model: all-MiniLM-L6-v2
 
+store:
+  persist_directory: data/chroma
+
 retrieval:
   top_k: 5
   reranker: null
@@ -17,3 +20,8 @@ generation:
   llm: ollama/llama3.2
   temperature: 0.1
   prompt_template: default_qa
+
+data:
+  documents:
+    - data/raw
+  eval_set: data/eval_sets/sample_questions.yaml

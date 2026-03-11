@@ -1,0 +1,15 @@
+questions:
+  - question: "What is retrieval-augmented generation?"
+    reference_answer: "RAG combines information retrieval with text generation, retrieving relevant documents from a knowledge base to use as context for generating answers."
+
+  - question: "What are the three types of machine learning?"
+    reference_answer: "Supervised learning, unsupervised learning, and reinforcement learning."
+
+  - question: "What is the difference between narrow AI and general AI?"
+    reference_answer: "Narrow AI is designed for specific tasks like virtual assistants and recommendation systems. General AI would understand, learn, and apply knowledge across domains like a human, but does not yet exist."
+
+  - question: "What are transformers in deep learning?"
+    reference_answer: "Transformers are a neural network architecture that uses self-attention mechanisms to process entire sequences in parallel. They are the architecture behind models like GPT and BERT."
+
+  - question: "How do you evaluate a RAG system?"
+    reference_answer: "RAG systems are evaluated using metrics like faithfulness (whether answers are grounded in retrieved context), answer relevancy, context precision, context recall, and latency."

@@ -13,7 +13,15 @@ retrieval:
   top_k: 5
   reranker: null
 
+store:
+  persist_directory: data/chroma
+
 generation:
   llm: ollama/llama3.2
   temperature: 0.1
   prompt_template: chain_of_thought
+
+data:
+  documents:
+    - data/raw
+  eval_set: data/eval_sets/sample_questions.yaml

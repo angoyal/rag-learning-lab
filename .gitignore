@@ -21,7 +21,14 @@ env/
 *~
 
 # Data & artifacts
+data/raw/*.pdf
+data/raw/arxiv_metadata.yaml
+data/arxivAutoScalingPapers/
+data/cache/
+data/conversations/
 data/processed/
+data/chroma/
+data/chroma.*/
 .chroma/
 *.lance/
 mlruns/
@@ -43,3 +50,10 @@ htmlcov/
 .coverage
 .coverage.*
 coverage.xml
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.backup
+*.tfplan
+lambda_trigger.zip

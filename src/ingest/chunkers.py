@@ -200,7 +200,13 @@ def sentence_chunker(text: str, chunk_size: int, chunk_overlap: int) -> list[Chu
     return chunks
 
 
-def semantic_chunker(text: str, embedder: Embedder, threshold: float = 0.5) -> list[Chunk]:
+def semantic_chunker(
+    text: str,
+    embedder: Embedder,
+    threshold: float = 0.5,
+    return_embeddings: bool = False,
+    batch_size: int = 64,
+) -> list[Chunk] | tuple[list[Chunk], np.ndarray]:
     """Split text at semantic boundaries using embedding similarity.
 
     Splits text into sentences, embeds each, and groups consecutive
@@ -213,46 +219,69 @@ def semantic_chunker(text: str, embedder: Embedder, threshold: float = 0.5) -> l
         embedder: An Embedder instance for computing sentence embeddings.
         threshold: Cosine similarity threshold (0-1). Lower values produce
             fewer, larger chunks. Higher values produce more, smaller chunks.
+        return_embeddings: If True, also return mean-pooled chunk embeddings
+            derived from the sentence embeddings (avoids re-embedding).
+        batch_size: Number of sentences per GPU batch. Lower values use
+            less GPU memory (important for large models like pplx-embed).
 
     Returns:
-        List of Chunk objects.
+        List of Chunk objects, or (chunks, chunk_embeddings) when
+        return_embeddings is True.
     """
     if not text:
+        if return_embeddings:
+            return [], np.empty((0, 0), dtype=np.float32)
         return []
 
     sentences = re.split(r"(?<=[.!?])\s+", text)
     sentences = [s for s in sentences if s.strip()]
     if not sentences:
+        if return_embeddings:
+            return [], np.empty((0, 0), dtype=np.float32)
         return []
 
     if len(sentences) == 1:
-        return [Chunk(text=text, index=0, start=0, end=len(text))]
+        chunks = [Chunk(text=text, index=0, start=0, end=len(text))]
+        if return_embeddings:
+            embs = embedder.embed(sentences, batch_size=batch_size)
+            return chunks, embs
+        return chunks
 
-    embeddings = embedder.embed(sentences)
+    sent_embeddings = embedder.embed(sentences, batch_size=batch_size)
     # Cosine similarity between consecutive sentence embeddings
-    norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
-    normalized = embeddings / norms
+    norms = np.linalg.norm(sent_embeddings, axis=1, keepdims=True)
+    normalized = sent_embeddings / norms
     similarities = np.sum(normalized[:-1] * normalized[1:], axis=1)
 
     # Find split points where similarity drops below threshold
     split_indices = [i + 1 for i, sim in enumerate(similarities) if sim < threshold]
 
-    # Build chunks from sentence groups
-    groups = []
+    # Build sentence index ranges per chunk
+    ranges = []
     prev = 0
     for idx in split_indices:
-        groups.append(sentences[prev:idx])
+        ranges.append((prev, idx))
         prev = idx
-    groups.append(sentences[prev:])
+    ranges.append((prev, len(sentences)))
 
+    # Build chunks from sentence groups
     chunks = []
     offset = 0
-    for i, group in enumerate(groups):
+    for i, (start_idx, end_idx) in enumerate(ranges):
+        group = sentences[start_idx:end_idx]
         start = text.index(group[0], offset)
         last_sentence = group[-1]
         end = text.index(last_sentence, start) + len(last_sentence)
         chunks.append(Chunk(text=text[start:end], index=i, start=start, end=end))
         offset = end
+
+    if return_embeddings:
+        # Mean-pool sentence embeddings per chunk
+        chunk_embeddings = np.array([
+            sent_embeddings[start_idx:end_idx].mean(axis=0)
+            for start_idx, end_idx in ranges
+        ])
+        return chunks, chunk_embeddings
 
     return chunks
 

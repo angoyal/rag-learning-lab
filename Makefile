@@ -1,4 +1,4 @@
-.PHONY: lint format test-unit test-integration eval test security-test clean sync \
+.PHONY: lint format test-unit test-integration eval test security-test clean clean-rag sync \
        deploy-local deploy-aws deploy-gcp rollback sync-plan
 
 sync:
@@ -46,6 +46,9 @@ sync-plan:
 		git commit -m "Sync plan from master plan file" && \
 		echo "Plan synced and committed"; \
 	fi
+
+clean-rag:
+	rm -rf data/chroma/ .chroma/
 
 clean:
 	find . -type d -name __pycache__ -exec rm -rf {} +
