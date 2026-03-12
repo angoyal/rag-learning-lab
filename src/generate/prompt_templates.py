@@ -22,6 +22,29 @@ _REWRITE_QUERY = _ENV.from_string(
     "Rewritten question:"
 )
 
+_GENERATE_TITLE = _ENV.from_string(
+    "Generate a short title (5 words or fewer) for this conversation. "
+    "Reply with ONLY the title, no quotes or punctuation.\n"
+    "\n"
+    "User: {{ question }}\n"
+    "Assistant: {{ answer }}\n"
+    "\n"
+    "Title:"
+)
+
+_COMPACT_CONTEXT = _ENV.from_string(
+    "Summarize this conversation into a concise context paragraph that "
+    "preserves all key facts, questions asked, and answers given. "
+    "This summary will replace the full conversation history to save space.\n"
+    "\n"
+    "Conversation:\n"
+    "{% for turn in turns %}"
+    "{{ turn.role | capitalize }}: {{ turn.content }}\n"
+    "{% endfor %}"
+    "\n"
+    "Summary:"
+)
+
 _TEMPLATES = {
     "default_qa": _ENV.from_string(
         "Answer the question based on the context below. "
@@ -116,6 +139,31 @@ def render_prompt(
     if template is None:
         raise ValueError(f"Unknown template: {template_name!r}")
     return template.render(chunks=chunks, question=question, history=history or [])
+
+
+def render_title(question: str, answer: str) -> str:
+    """Render a prompt to generate a short conversation title.
+
+    Args:
+        question: The user's first question.
+        answer: The assistant's first answer.
+
+    Returns:
+        The rendered title-generation prompt string.
+    """
+    return _GENERATE_TITLE.render(question=question, answer=answer[:200])
+
+
+def render_compact(turns: list[dict]) -> str:
+    """Render a prompt to compact conversation history into a summary.
+
+    Args:
+        turns: List of conversation turns with "role" and "content" keys.
+
+    Returns:
+        The rendered compaction prompt string.
+    """
+    return _COMPACT_CONTEXT.render(turns=turns)
 
 
 def render_rewrite(question: str, history: list[dict]) -> str:

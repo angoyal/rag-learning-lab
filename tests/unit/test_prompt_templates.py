@@ -3,7 +3,12 @@
 from __future__ import annotations
 
 import pytest
-from src.generate.prompt_templates import render_prompt, render_rewrite
+from src.generate.prompt_templates import (
+    render_compact,
+    render_prompt,
+    render_rewrite,
+    render_title,
+)
 
 CHUNKS = [
     "Python is a high-level programming language.",
@@ -201,5 +206,53 @@ def test_render_rewrite_has_self_contained_instruction():
 @pytest.mark.unit
 def test_render_rewrite_capitalizes_roles():
     prompt = render_rewrite("More?", HISTORY)
+    assert "User:" in prompt
+    assert "Assistant:" in prompt
+
+
+# -- render_title --
+
+
+@pytest.mark.unit
+def test_render_title_contains_question_and_answer():
+    prompt = render_title("What is RAG?", "RAG stands for...")
+    assert "What is RAG?" in prompt
+    assert "RAG stands for" in prompt
+
+
+@pytest.mark.unit
+def test_render_title_truncates_long_answer():
+    long_answer = "A" * 500
+    prompt = render_title("Q?", long_answer)
+    # Only first 200 chars of answer should be included
+    assert "A" * 200 in prompt
+    assert "A" * 201 not in prompt
+
+
+@pytest.mark.unit
+def test_render_title_has_title_instruction():
+    prompt = render_title("Q?", "A.")
+    assert "title" in prompt.lower()
+
+
+# -- render_compact --
+
+
+@pytest.mark.unit
+def test_render_compact_contains_turns():
+    prompt = render_compact(HISTORY)
+    assert "What is Python?" in prompt
+    assert "Python is a programming language." in prompt
+
+
+@pytest.mark.unit
+def test_render_compact_has_summary_instruction():
+    prompt = render_compact(HISTORY)
+    assert "summarize" in prompt.lower()
+
+
+@pytest.mark.unit
+def test_render_compact_capitalizes_roles():
+    prompt = render_compact(HISTORY)
     assert "User:" in prompt
     assert "Assistant:" in prompt

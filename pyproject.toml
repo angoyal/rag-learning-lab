@@ -40,6 +40,7 @@ dependencies = [
     # API & serving
     "fastapi>=0.115",
     "uvicorn>=0.34",
+    "rich>=14.3.3",
 ]
 
 [project.optional-dependencies]

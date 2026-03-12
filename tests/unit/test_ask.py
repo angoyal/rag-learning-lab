@@ -7,13 +7,16 @@ from pathlib import Path
 import pytest
 import yaml
 from scripts.ask import (
+    Spinner,
     delete_all_conversations,
     delete_conversation,
+    generate_title,
     handle_slash_command,
     list_conversations,
     load_conversation,
     print_chunks,
     print_sources,
+    query_with_retry,
     save_conversation,
 )
 
@@ -42,6 +45,22 @@ def _save_samples(conv_dir: Path) -> list[str]:
     for cid, title in zip(ids, titles):
         save_conversation(conv_dir, cid, title, _sample_turns())
     return ids
+
+
+def _run_cmd(
+    command: str, conv_dir: Path,
+    show_chunks: bool = False, show_prompt: bool = False,
+    show_debug: bool = False, turns: list[dict] | None = None,
+    last_results: list[dict] | None = None,
+    pipeline=None, last_question: str | None = None,
+    conv_id: str = "id", title: str = "",
+) -> tuple:
+    """Helper to run a slash command with the full signature."""
+    return handle_slash_command(
+        command, conv_dir, conv_id, title, turns or [],
+        show_chunks, show_prompt, show_debug,
+        last_results, pipeline, last_question,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -194,30 +213,30 @@ class TestDeleteAllConversations:
 @pytest.mark.unit
 class TestSlashToggleCommands:
 
-    def _run(
-        self, command: str, conv_dir: Path,
-        show_chunks: bool = False, show_prompt: bool = False,
-    ) -> tuple:
-        return handle_slash_command(
-            command, conv_dir, "id", "title", [], show_chunks, show_prompt,
-        )
-
     def test_chunks_toggle_on(self, conv_dir: Path) -> None:
-        result = self._run("/chunks", conv_dir, show_chunks=False)
+        result = _run_cmd("/chunks", conv_dir, show_chunks=False)
         assert result[3] is True   # show_chunks
-        assert result[5] is True   # handled
+        assert result[6] is True   # handled
 
     def test_chunks_toggle_off(self, conv_dir: Path) -> None:
-        result = self._run("/chunks", conv_dir, show_chunks=True)
+        result = _run_cmd("/chunks", conv_dir, show_chunks=True)
         assert result[3] is False
 
     def test_prompt_toggle_on(self, conv_dir: Path) -> None:
-        result = self._run("/prompt", conv_dir, show_prompt=False)
+        result = _run_cmd("/prompt", conv_dir, show_prompt=False)
         assert result[4] is True   # show_prompt
 
     def test_prompt_toggle_off(self, conv_dir: Path) -> None:
-        result = self._run("/prompt", conv_dir, show_prompt=True)
+        result = _run_cmd("/prompt", conv_dir, show_prompt=True)
         assert result[4] is False
+
+    def test_debug_toggle_on(self, conv_dir: Path) -> None:
+        result = _run_cmd("/debug", conv_dir, show_debug=False)
+        assert result[5] is True   # show_debug
+
+    def test_debug_toggle_off(self, conv_dir: Path) -> None:
+        result = _run_cmd("/debug", conv_dir, show_debug=True)
+        assert result[5] is False
 
 
 # ---------------------------------------------------------------------------
@@ -230,28 +249,25 @@ class TestSlashNew:
 
     def test_new_clears_turns(self, conv_dir: Path) -> None:
         turns = _sample_turns()
-        conv_id, title, new_turns, _, _, handled = handle_slash_command(
-            "/new", conv_dir, "old-id", "old-title", turns, False, False,
+        result = _run_cmd(
+            "/new", conv_dir, turns=turns, conv_id="old-id", title="old-title",
         )
+        conv_id, title, new_turns = result[0], result[1], result[2]
         assert new_turns == []
         assert title == ""
         assert conv_id != "old-id"
-        assert handled is True
+        assert result[6] is True  # handled
 
     def test_new_saves_current_conversation(self, conv_dir: Path) -> None:
         turns = _sample_turns()
-        handle_slash_command(
-            "/new", conv_dir, "old-id", "old-title", turns, False, False,
-        )
+        _run_cmd("/new", conv_dir, turns=turns, conv_id="old-id", title="old-title")
         # The old conversation should be saved
         data = load_conversation(conv_dir, "old-id")
         assert data is not None
         assert data["title"] == "old-title"
 
     def test_new_with_no_turns_does_not_save(self, conv_dir: Path) -> None:
-        handle_slash_command(
-            "/new", conv_dir, "empty-id", "", [], False, False,
-        )
+        _run_cmd("/new", conv_dir, conv_id="empty-id")
         assert load_conversation(conv_dir, "empty-id") is None
 
 
@@ -264,17 +280,13 @@ class TestSlashNew:
 class TestSlashConversations:
 
     def test_lists_empty(self, conv_dir: Path, capsys) -> None:
-        handle_slash_command(
-            "/conversations", conv_dir, "id", "", [], False, False,
-        )
+        _run_cmd("/conversations", conv_dir)
         output = capsys.readouterr().out
         assert "No saved conversations" in output
 
     def test_lists_existing(self, conv_dir: Path, capsys) -> None:
         _save_samples(conv_dir)
-        handle_slash_command(
-            "/conversations", conv_dir, "id", "", [], False, False,
-        )
+        _run_cmd("/conversations", conv_dir)
         output = capsys.readouterr().out
         assert "3 saved conversation(s)" in output
         assert "First question" in output
@@ -291,29 +303,26 @@ class TestSlashResume:
 
     def test_resume_with_id(self, conv_dir: Path) -> None:
         ids = _save_samples(conv_dir)
-        conv_id, title, turns, _, _, handled = handle_slash_command(
-            f"/resume {ids[0]}", conv_dir, "cur-id", "cur", [], False, False,
-        )
+        result = _run_cmd(f"/resume {ids[0]}", conv_dir)
+        conv_id, title, turns = result[0], result[1], result[2]
         assert conv_id == ids[0]
         assert title == "First question"
         assert len(turns) == 2
-        assert handled is True
+        assert result[6] is True  # handled
 
     def test_resume_nonexistent(self, conv_dir: Path, capsys) -> None:
         conv_dir.mkdir(parents=True, exist_ok=True)
-        _, _, turns, _, _, _ = handle_slash_command(
-            "/resume no-such-id", conv_dir, "id", "", [], False, False,
-        )
+        result = _run_cmd("/resume no-such-id", conv_dir)
         output = capsys.readouterr().out
         assert "not found" in output
-        assert turns == []
+        assert result[2] == []  # turns
 
     def test_resume_saves_current_conversation(self, conv_dir: Path) -> None:
         ids = _save_samples(conv_dir)
         current_turns = [{"role": "user", "content": "current q"}]
-        handle_slash_command(
-            f"/resume {ids[0]}", conv_dir, "cur-id", "cur-title",
-            current_turns, False, False,
+        _run_cmd(
+            f"/resume {ids[0]}", conv_dir,
+            turns=current_turns, conv_id="cur-id", title="cur-title",
         )
         # Current conversation should be saved before resuming
         data = load_conversation(conv_dir, "cur-id")
@@ -331,25 +340,19 @@ class TestSlashDelete:
 
     def test_delete_existing(self, conv_dir: Path, capsys) -> None:
         ids = _save_samples(conv_dir)
-        handle_slash_command(
-            f"/delete {ids[0]}", conv_dir, "id", "", [], False, False,
-        )
+        _run_cmd(f"/delete {ids[0]}", conv_dir)
         output = capsys.readouterr().out
         assert "Deleted" in output
         assert load_conversation(conv_dir, ids[0]) is None
 
     def test_delete_nonexistent(self, conv_dir: Path, capsys) -> None:
         conv_dir.mkdir(parents=True, exist_ok=True)
-        handle_slash_command(
-            "/delete nope", conv_dir, "id", "", [], False, False,
-        )
+        _run_cmd("/delete nope", conv_dir)
         output = capsys.readouterr().out
         assert "not found" in output
 
     def test_delete_no_arg(self, conv_dir: Path, capsys) -> None:
-        handle_slash_command(
-            "/delete", conv_dir, "id", "", [], False, False,
-        )
+        _run_cmd("/delete", conv_dir)
         output = capsys.readouterr().out
         assert "Usage" in output
 
@@ -365,21 +368,19 @@ class TestSlashDeleteAll:
     def test_delete_all_confirmed(self, conv_dir: Path, monkeypatch, capsys) -> None:
         _save_samples(conv_dir)
         monkeypatch.setattr("builtins.input", lambda _: "yes")
-        conv_id, title, turns, _, _, _ = handle_slash_command(
-            "/delete-all", conv_dir, "cur-id", "cur", _sample_turns(), False, False,
+        result = _run_cmd(
+            "/delete-all", conv_dir,
+            turns=_sample_turns(), conv_id="cur-id", title="cur",
         )
         output = capsys.readouterr().out
         assert "Deleted 3" in output
         assert list_conversations(conv_dir) == []
-        # Current conversation should be reset
-        assert turns == []
+        assert result[2] == []  # turns reset
 
     def test_delete_all_cancelled(self, conv_dir: Path, monkeypatch, capsys) -> None:
         _save_samples(conv_dir)
         monkeypatch.setattr("builtins.input", lambda _: "no")
-        handle_slash_command(
-            "/delete-all", conv_dir, "id", "", [], False, False,
-        )
+        _run_cmd("/delete-all", conv_dir)
         output = capsys.readouterr().out
         assert "Cancelled" in output
         assert len(list_conversations(conv_dir)) == 3
@@ -391,9 +392,7 @@ class TestSlashDeleteAll:
             raise EOFError
 
         monkeypatch.setattr("builtins.input", raise_eof)
-        handle_slash_command(
-            "/delete-all", conv_dir, "id", "", [], False, False,
-        )
+        _run_cmd("/delete-all", conv_dir)
         # Should not crash, conversations preserved
         assert len(list_conversations(conv_dir)) == 3
 
@@ -407,22 +406,59 @@ class TestSlashDeleteAll:
 class TestSlashHelp:
 
     def test_help(self, conv_dir: Path, capsys) -> None:
-        _, _, _, _, _, handled = handle_slash_command(
-            "/help", conv_dir, "id", "", [], False, False,
-        )
+        result = _run_cmd("/help", conv_dir)
         output = capsys.readouterr().out
         assert "/chunks" in output
         assert "/resume" in output
         assert "/delete-all" in output
-        assert handled is True
+        assert "/debug" in output
+        assert "/regenerate" in output
+        assert "/compact" in output
+        assert result[6] is True  # handled
 
     def test_unknown_command(self, conv_dir: Path, capsys) -> None:
-        _, _, _, _, _, handled = handle_slash_command(
-            "/foobar", conv_dir, "id", "", [], False, False,
-        )
+        result = _run_cmd("/foobar", conv_dir)
         output = capsys.readouterr().out
         assert "Unknown command" in output
-        assert handled is True
+        assert result[6] is True  # handled
+
+
+# ---------------------------------------------------------------------------
+# handle_slash_command — /regenerate
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestSlashRegenerate:
+
+    def test_regenerate_returns_question(self, conv_dir: Path) -> None:
+        turns = _sample_turns()
+        result = _run_cmd(
+            "/regenerate", conv_dir, turns=turns, last_question="What is RAG?",
+        )
+        assert result[7] == "What is RAG?"  # regenerate_question
+        # Last Q&A pair should be removed from turns
+        assert len(result[2]) == 0
+
+    def test_regenerate_no_previous_question(self, conv_dir: Path, capsys) -> None:
+        result = _run_cmd("/regenerate", conv_dir)
+        output = capsys.readouterr().out
+        assert "No previous question" in output
+        assert result[7] is None
+
+    def test_regenerate_preserves_earlier_turns(self, conv_dir: Path) -> None:
+        turns = [
+            {"role": "user", "content": "First question"},
+            {"role": "assistant", "content": "First answer"},
+            {"role": "user", "content": "Second question"},
+            {"role": "assistant", "content": "Second answer"},
+        ]
+        result = _run_cmd(
+            "/regenerate", conv_dir, turns=turns, last_question="Second question",
+        )
+        assert len(result[2]) == 2  # Only first Q&A pair remains
+        assert result[2][0]["content"] == "First question"
+        assert result[7] == "Second question"
 
 
 # ---------------------------------------------------------------------------
@@ -444,7 +480,7 @@ class TestPrintSources:
         assert "paper_a.pdf" in output
         assert "paper_b.pdf" in output
         # Should appear on only one line (deduplicated)
-        lines_with_a = [l for l in output.splitlines() if "paper_a.pdf" in l]
+        lines_with_a = [line for line in output.splitlines() if "paper_a.pdf" in line]
         assert len(lines_with_a) == 1
 
     def test_no_sources(self, capsys) -> None:
@@ -495,6 +531,136 @@ class TestPrintChunks:
         output = capsys.readouterr().out
         assert "[1]" in output
         assert "some text" in output
+
+
+# ---------------------------------------------------------------------------
+# Spinner
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestSpinner:
+
+    def test_start_and_stop(self) -> None:
+        spinner = Spinner("Testing")
+        spinner.start()
+        assert spinner._thread is not None
+        assert spinner._thread.is_alive()
+        spinner.stop()
+        assert not spinner._thread.is_alive()
+
+    def test_stop_is_idempotent(self) -> None:
+        spinner = Spinner()
+        spinner.start()
+        spinner.stop()
+        spinner.stop()  # Should not raise
+
+    def test_spinner_is_daemon(self) -> None:
+        spinner = Spinner()
+        spinner.start()
+        assert spinner._thread.daemon is True
+        spinner.stop()
+
+
+# ---------------------------------------------------------------------------
+# query_with_retry
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestQueryWithRetry:
+
+    def test_success_on_first_try(self) -> None:
+        class FakePipeline:
+            def query(self, question, history=None):
+                return {"answer": "ok", "chunks": [], "results": []}
+
+        result = query_with_retry(FakePipeline(), "test", [], False)
+        assert result["answer"] == "ok"
+
+    def test_retries_on_connection_error(self) -> None:
+        call_count = 0
+
+        class FakePipeline:
+            def query(self, question, history=None):
+                nonlocal call_count
+                call_count += 1
+                if call_count < 3:
+                    raise ConnectionError("timeout")
+                return {"answer": "recovered"}
+
+        result = query_with_retry(FakePipeline(), "test", [], False)
+        assert result["answer"] == "recovered"
+        assert call_count == 3
+
+    def test_raises_after_max_retries(self) -> None:
+        class FakePipeline:
+            def query(self, question, history=None):
+                raise ConnectionError("always fails")
+
+        with pytest.raises(ConnectionError, match="always fails"):
+            query_with_retry(FakePipeline(), "test", [], False)
+
+    def test_non_retryable_error_not_caught(self) -> None:
+        class FakePipeline:
+            def query(self, question, history=None):
+                raise ValueError("bad input")
+
+        with pytest.raises(ValueError, match="bad input"):
+            query_with_retry(FakePipeline(), "test", [], False)
+
+
+# ---------------------------------------------------------------------------
+# generate_title
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+class TestGenerateTitle:
+
+    def test_returns_llm_title(self) -> None:
+        class FakeLLM:
+            def generate(self, prompt):
+                return "  RAG Overview  "
+
+        class FakePipeline:
+            llm = FakeLLM()
+
+        title = generate_title(FakePipeline(), "What is RAG?", "RAG is...")
+        assert title == "RAG Overview"
+
+    def test_strips_quotes(self) -> None:
+        class FakeLLM:
+            def generate(self, prompt):
+                return '"My Title"'
+
+        class FakePipeline:
+            llm = FakeLLM()
+
+        title = generate_title(FakePipeline(), "q", "a")
+        assert title == "My Title"
+
+    def test_fallback_on_error(self) -> None:
+        class FakeLLM:
+            def generate(self, prompt):
+                raise RuntimeError("LLM down")
+
+        class FakePipeline:
+            llm = FakeLLM()
+
+        title = generate_title(FakePipeline(), "What is RAG?", "answer")
+        assert title == "What is RAG?"
+
+    def test_truncates_long_title(self) -> None:
+        class FakeLLM:
+            def generate(self, prompt):
+                return "A" * 200
+
+        class FakePipeline:
+            llm = FakeLLM()
+
+        title = generate_title(FakePipeline(), "q", "a")
+        assert len(title) == 80
 
 
 # ---------------------------------------------------------------------------

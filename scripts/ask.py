@@ -13,16 +13,26 @@ from __future__ import annotations
 import argparse
 import atexit
 import readline
+import sys
+import threading
 import time
+import traceback
 from datetime import UTC, datetime
 from pathlib import Path
 
 import yaml
+from rich.console import Console
+from rich.markdown import Markdown
+from src.generate.prompt_templates import render_compact, render_title
 from src.pipeline import RAGPipeline, load_config
 
 DEFAULT_CONVERSATIONS_DIR = "data/conversations"
 METADATA_FILENAME = "arxiv_metadata.yaml"
 HISTORY_FILE = Path("data/conversations/.ask_history")
+MAX_RETRIES = 3
+SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+
+console = Console()
 
 
 def setup_readline() -> None:
@@ -51,6 +61,42 @@ def setup_readline() -> None:
     else:
         readline.parse_and_bind(r'"\C-w": forward-word')
         readline.parse_and_bind(r'"\C-b": backward-word')
+
+
+class Spinner:
+    """Animated terminal spinner that runs in a background thread.
+
+    Args:
+        message: Text to display alongside the spinner animation.
+    """
+
+    def __init__(self, message: str = "Thinking"):
+        self._message = message
+        self._stop_event = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        """Start the spinner animation in a daemon thread."""
+        self._stop_event.clear()
+        self._thread = threading.Thread(target=self._spin, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        """Stop the spinner and clear the line."""
+        self._stop_event.set()
+        if self._thread:
+            self._thread.join()
+        sys.stderr.write("\r\033[K")
+        sys.stderr.flush()
+
+    def _spin(self) -> None:
+        idx = 0
+        while not self._stop_event.is_set():
+            frame = SPINNER_FRAMES[idx % len(SPINNER_FRAMES)]
+            sys.stderr.write(f"\r{frame} {self._message}...")
+            sys.stderr.flush()
+            idx += 1
+            self._stop_event.wait(0.08)
 
 
 def conversation_id() -> str:
@@ -260,10 +306,72 @@ def print_chunks(results: list[dict], chunks: list[str]) -> None:
     print()
 
 
+def query_with_retry(
+    pipeline: RAGPipeline,
+    question: str,
+    turns: list[dict],
+    show_debug: bool,
+) -> dict:
+    """Run a pipeline query with automatic retry on transient errors.
+
+    Retries up to MAX_RETRIES times with exponential backoff on connection
+    and server errors. Shows stack traces when debug mode is enabled.
+
+    Args:
+        pipeline: The RAG pipeline instance.
+        question: The user's question.
+        turns: Conversation history for query rewriting.
+        show_debug: Whether to print stack traces on error.
+
+    Returns:
+        Query result dict from the pipeline.
+
+    Raises:
+        Exception: Re-raises the last exception after all retries are exhausted.
+    """
+    last_error = None
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            return pipeline.query(question, history=turns or None)
+        except (ConnectionError, OSError, RuntimeError) as e:
+            last_error = e
+            if show_debug:
+                traceback.print_exc()
+            if attempt < MAX_RETRIES:
+                wait = 2 ** attempt
+                print(f"  Retry {attempt}/{MAX_RETRIES} in {wait}s: {e}")
+                time.sleep(wait)
+            else:
+                print(f"  Failed after {MAX_RETRIES} attempts: {e}")
+    raise last_error  # type: ignore[misc]
+
+
+def generate_title(pipeline: RAGPipeline, question: str, answer: str) -> str:
+    """Use the LLM to generate a short conversation title.
+
+    Args:
+        pipeline: The RAG pipeline instance (for LLM access).
+        question: The user's first question.
+        answer: The assistant's first answer.
+
+    Returns:
+        A short title string, or first 80 chars of the question on failure.
+    """
+    try:
+        prompt = render_title(question, answer)
+        title = pipeline.llm.generate(prompt).strip().strip('"\'')
+        return title[:80] if title else question[:80]
+    except Exception:
+        return question[:80]
+
+
 def handle_slash_command(
     command: str, conv_dir: Path, conv_id: str, title: str, turns: list[dict],
-    show_chunks: bool, show_prompt: bool, last_results: list[dict] | None = None,
-) -> tuple[str, str, list[dict], bool, bool, bool]:
+    show_chunks: bool, show_prompt: bool, show_debug: bool,
+    last_results: list[dict] | None = None,
+    pipeline: RAGPipeline | None = None,
+    last_question: str | None = None,
+) -> tuple[str, str, list[dict], bool, bool, bool, bool, str | None]:
     """Handle a slash command and return updated state.
 
     Args:
@@ -274,24 +382,34 @@ def handle_slash_command(
         turns: Current conversation turns.
         show_chunks: Current show-chunks toggle state.
         show_prompt: Current show-prompt toggle state.
+        show_debug: Current show-debug toggle state.
         last_results: Retrieval results from the most recent query.
+        pipeline: RAG pipeline for /regenerate and /compact.
+        last_question: The last question asked (for /regenerate).
 
     Returns:
-        Tuple of (conv_id, title, turns, show_chunks, show_prompt, handled).
+        Tuple of (conv_id, title, turns, show_chunks, show_prompt,
+        show_debug, handled, regenerate_question).
     """
     parts = command.split(maxsplit=1)
     cmd = parts[0]
     arg = parts[1] if len(parts) > 1 else ""
+    no_regen: str | None = None
 
     if cmd == "/chunks":
         show_chunks = not show_chunks
         print(f"  show-chunks: {'ON' if show_chunks else 'OFF'}\n")
-        return conv_id, title, turns, show_chunks, show_prompt, True
+        return conv_id, title, turns, show_chunks, show_prompt, show_debug, True, no_regen
 
     if cmd == "/prompt":
         show_prompt = not show_prompt
         print(f"  show-prompt: {'ON' if show_prompt else 'OFF'}\n")
-        return conv_id, title, turns, show_chunks, show_prompt, True
+        return conv_id, title, turns, show_chunks, show_prompt, show_debug, True, no_regen
+
+    if cmd == "/debug":
+        show_debug = not show_debug
+        print(f"  debug: {'ON' if show_debug else 'OFF'}\n")
+        return conv_id, title, turns, show_chunks, show_prompt, show_debug, True, no_regen
 
     if cmd == "/new":
         if turns:
@@ -301,7 +419,7 @@ def handle_slash_command(
         title = ""
         turns = []
         print("  Started new conversation\n")
-        return conv_id, title, turns, show_chunks, show_prompt, True
+        return conv_id, title, turns, show_chunks, show_prompt, show_debug, True, no_regen
 
     if cmd == "/conversations":
         convos = list_conversations(conv_dir)
@@ -312,7 +430,7 @@ def handle_slash_command(
             for c in convos:
                 print(f"    {c['id']}  {c['title']}  ({c['turns']} turns)")
             print()
-        return conv_id, title, turns, show_chunks, show_prompt, True
+        return conv_id, title, turns, show_chunks, show_prompt, show_debug, True, no_regen
 
     if cmd == "/resume":
         if arg:
@@ -321,7 +439,7 @@ def handle_slash_command(
             convos = list_conversations(conv_dir)
             if not convos:
                 print("  No saved conversations\n")
-                return conv_id, title, turns, show_chunks, show_prompt, True
+                return conv_id, title, turns, show_chunks, show_prompt, show_debug, True, no_regen
             print("  Saved conversations:")
             for i, c in enumerate(convos, 1):
                 print(f"    {i}. {c['id']}  {c['title']}  ({c['turns']} turns)")
@@ -329,7 +447,7 @@ def handle_slash_command(
                 choice = input("  Enter number or ID: ").strip()
             except (EOFError, KeyboardInterrupt):
                 print()
-                return conv_id, title, turns, show_chunks, show_prompt, True
+                return conv_id, title, turns, show_chunks, show_prompt, show_debug, True, no_regen
             if choice.isdigit() and 1 <= int(choice) <= len(convos):
                 target_id = convos[int(choice) - 1]["id"]
             else:
@@ -354,24 +472,24 @@ def handle_slash_command(
             if len(turns) > 6:
                 print(f"    ... ({len(turns) - 6} earlier turns)")
             print()
-        return conv_id, title, turns, show_chunks, show_prompt, True
+        return conv_id, title, turns, show_chunks, show_prompt, show_debug, True, no_regen
 
     if cmd == "/delete":
         if not arg:
             print("  Usage: /delete <conversation-id>\n")
-            return conv_id, title, turns, show_chunks, show_prompt, True
+            return conv_id, title, turns, show_chunks, show_prompt, show_debug, True, no_regen
         if delete_conversation(conv_dir, arg):
             print(f"  Deleted conversation '{arg}'\n")
         else:
             print(f"  Conversation '{arg}' not found\n")
-        return conv_id, title, turns, show_chunks, show_prompt, True
+        return conv_id, title, turns, show_chunks, show_prompt, show_debug, True, no_regen
 
     if cmd == "/delete-all":
         try:
             confirm = input("  Delete all conversations? (yes/no): ").strip()
         except (EOFError, KeyboardInterrupt):
             print()
-            return conv_id, title, turns, show_chunks, show_prompt, True
+            return conv_id, title, turns, show_chunks, show_prompt, show_debug, True, no_regen
         if confirm.lower() == "yes":
             count = delete_all_conversations(conv_dir)
             print(f"  Deleted {count} conversation(s)\n")
@@ -381,17 +499,51 @@ def handle_slash_command(
                 turns = []
         else:
             print("  Cancelled\n")
-        return conv_id, title, turns, show_chunks, show_prompt, True
+        return conv_id, title, turns, show_chunks, show_prompt, show_debug, True, no_regen
 
     if cmd == "/papers":
         print_papers(last_results or [])
-        return conv_id, title, turns, show_chunks, show_prompt, True
+        return conv_id, title, turns, show_chunks, show_prompt, show_debug, True, no_regen
+
+    if cmd == "/regenerate":
+        if not last_question:
+            print("  No previous question to regenerate.\n")
+            return conv_id, title, turns, show_chunks, show_prompt, show_debug, True, no_regen
+        # Remove the last Q&A pair from turns before regenerating
+        if len(turns) >= 2 and turns[-2]["role"] == "user":
+            turns = turns[:-2]
+        return conv_id, title, turns, show_chunks, show_prompt, show_debug, True, last_question
+
+    if cmd == "/compact":
+        if not pipeline or len(turns) < 4:
+            print("  Not enough conversation history to compact.\n")
+            return conv_id, title, turns, show_chunks, show_prompt, show_debug, True, no_regen
+        spinner = Spinner("Compacting")
+        spinner.start()
+        try:
+            prompt = render_compact(turns)
+            summary = pipeline.llm.generate(prompt).strip()
+        except Exception as e:
+            spinner.stop()
+            print(f"  Compact failed: {e}\n")
+            return conv_id, title, turns, show_chunks, show_prompt, show_debug, True, no_regen
+        spinner.stop()
+        old_count = len(turns)
+        turns = [
+            {"role": "user", "content": "[Previous conversation summary]"},
+            {"role": "assistant", "content": summary},
+        ]
+        print(f"  Compacted {old_count} turns → 2 (summary)\n")
+        return conv_id, title, turns, show_chunks, show_prompt, show_debug, True, no_regen
 
     if cmd == "/help":
         print("  Commands:")
         print("    /chunks         Toggle chunk display")
         print("    /prompt         Toggle prompt display")
+        print("    /debug          Toggle debug traces")
         print("    /papers         Show title & abstract of cited papers")
+        print("    /regenerate     Re-generate last answer")
+        print("    /compact        Compact conversation history")
         print("    /new            Start a new conversation")
         print("    /conversations  List saved conversations")
         print("    /resume [id]    Resume a previous conversation")
@@ -399,10 +551,10 @@ def handle_slash_command(
         print("    /delete-all     Delete all conversations")
         print("    /help           Show this help")
         print()
-        return conv_id, title, turns, show_chunks, show_prompt, True
+        return conv_id, title, turns, show_chunks, show_prompt, show_debug, True, no_regen
 
     print(f"  Unknown command: {cmd}. Type /help for commands.\n")
-    return conv_id, title, turns, show_chunks, show_prompt, True
+    return conv_id, title, turns, show_chunks, show_prompt, show_debug, True, no_regen
 
 
 def main() -> None:
@@ -444,8 +596,10 @@ def main() -> None:
     title = ""
     turns: list[dict] = []
     last_results: list[dict] = []
+    last_question: str | None = None
     show_chunks = args.show_chunks
     show_prompt = args.show_prompt
+    show_debug = False
 
     print(f"Connected to '{collection}' ({n_chunks} chunks)")
     print("Ask questions. Type 'quit' to exit, /help for commands.\n")
@@ -465,25 +619,44 @@ def main() -> None:
             break
 
         if question.startswith("/"):
-            conv_id, title, turns, show_chunks, show_prompt, _ = (
+            conv_id, title, turns, show_chunks, show_prompt, show_debug, _, regen_q = (
                 handle_slash_command(
                     question, conv_dir, conv_id, title, turns,
-                    show_chunks, show_prompt, last_results,
+                    show_chunks, show_prompt, show_debug, last_results,
+                    pipeline, last_question,
                 )
             )
-            continue
+            if regen_q:
+                question = regen_q
+            else:
+                continue
 
-        start = time.perf_counter()
-        result = pipeline.query(question, history=turns or None)
-        elapsed = time.perf_counter() - start
+        spinner = Spinner()
+        spinner.start()
+        try:
+            start = time.perf_counter()
+            result = query_with_retry(pipeline, question, turns, show_debug)
+            elapsed = time.perf_counter() - start
+        except KeyboardInterrupt:
+            spinner.stop()
+            print("\n  Interrupted.\n")
+            continue
+        except Exception as e:
+            spinner.stop()
+            if show_debug:
+                traceback.print_exc()
+            print(f"\n  Error: {e}\n")
+            continue
+        spinner.stop()
 
         if result.get("rewritten_query"):
             print(f"  (rewritten: {result['rewritten_query']})")
 
         last_results = result["results"]
+        last_question = question
 
         print()
-        print(result["answer"])
+        console.print(Markdown(result["answer"]))
         print_sources(last_results)
         print(f"\n({len(result['chunks'])} chunks, {elapsed:.2f}s)\n")
 
@@ -495,9 +668,10 @@ def main() -> None:
             print(result["prompt"])
             print()
 
-        # Update history
+        # Generate title from LLM on the first exchange
         if not title:
-            title = question[:80]
+            title = generate_title(pipeline, question, result["answer"])
+
         turns.append({"role": "user", "content": question})
         turns.append({"role": "assistant", "content": result["answer"]})
 
