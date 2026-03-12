@@ -11,6 +11,8 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import atexit
+import readline
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -20,6 +22,35 @@ from src.pipeline import RAGPipeline, load_config
 
 DEFAULT_CONVERSATIONS_DIR = "data/conversations"
 METADATA_FILENAME = "arxiv_metadata.yaml"
+HISTORY_FILE = Path("data/conversations/.ask_history")
+
+
+def setup_readline() -> None:
+    """Configure readline for interactive prompt editing and history.
+
+    Sets up persistent history across sessions and custom key bindings:
+    - Up/Down: navigate prompt history
+    - Ctrl+R: reverse search through history
+    - Ctrl+A: move cursor to beginning of line
+    - Ctrl+E: move cursor to end of line
+    - Ctrl+W: move cursor forward one word
+    - Ctrl+B: move cursor backward one word
+    """
+    HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        readline.read_history_file(HISTORY_FILE)
+    except FileNotFoundError:
+        pass
+    readline.set_history_length(1000)
+    atexit.register(readline.write_history_file, HISTORY_FILE)
+
+    # Detect libedit (macOS) vs GNU readline (Linux)
+    if "libedit" in readline.__doc__:
+        readline.parse_and_bind("bind ^W forward-word")
+        readline.parse_and_bind("bind ^B backward-word")
+    else:
+        readline.parse_and_bind(r'"\C-w": forward-word')
+        readline.parse_and_bind(r'"\C-b": backward-word')
 
 
 def conversation_id() -> str:
@@ -376,6 +407,7 @@ def handle_slash_command(
 
 def main() -> None:
     """Start interactive Q&A loop against persisted ChromaDB embeddings."""
+    setup_readline()
     parser = argparse.ArgumentParser(description="Interactive RAG Q&A")
     parser.add_argument(
         "--config",
